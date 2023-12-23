@@ -352,7 +352,7 @@ fn get_duplex_tag(record: &Record) -> i8 {
             }
         }
     } else {
-        0
+        -2
     }
 }
 
