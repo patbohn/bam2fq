@@ -379,7 +379,7 @@ fn simplex_processor(config: Config) -> Result<(), Error> {
 
     let hist_output_file = File::create(hist_filename)?;
     let mut writer = BufWriter::new(hist_output_file);
-    writeln!(&mut writer, "phred_score,pass_count,fail_count")?;
+    writeln!(&mut writer, "phred_score,pass_count,fail_count,skip_count")?;
 
     for qscore in 0..MAX_QSCORE {
         writeln!(
