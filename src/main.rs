@@ -70,6 +70,14 @@ struct Config {
         help = "Tag to supply when extracting duplex-called reads"
     )]
     duplex: bool,
+
+    #[structopt(
+        short = "f",
+        long,
+        help = "skip first X nucleotides for quality calculation",
+        default_value = "0"
+    )]
+    skip_first: usize,
 }
 
 const MAX_QSCORE: usize = 94;
@@ -97,6 +105,7 @@ fn duplex_processor(config: Config) -> Result<(), Error> {
 
     let min_read_length: usize = config.min_read_length;
     let min_mean_qscore: f64 = config.min_mean_qscore;
+    let skip_first: usize = config.skip_first;
 
     //create output files
     let per_read_statsfile = File::create(per_read_filename)?;
@@ -116,9 +125,11 @@ fn duplex_processor(config: Config) -> Result<(), Error> {
     //create array to count phred qscores
     let mut simplex_p_qscore_hist: [u64; MAX_QSCORE] = [0; MAX_QSCORE];
     let mut simplex_f_qscore_hist: [u64; MAX_QSCORE] = [0; MAX_QSCORE];
+    let mut simplex_s_qscore_hist: [u64; MAX_QSCORE] = [0; MAX_QSCORE];
 
     let mut duplex_p_qscore_hist: [u64; MAX_QSCORE] = [0; MAX_QSCORE];
     let mut duplex_f_qscore_hist: [u64; MAX_QSCORE] = [0; MAX_QSCORE];
+    let mut duplex_s_qscore_hist: [u64; MAX_QSCORE] = [0; MAX_QSCORE];
 
     for record in bam_reader {
         //extract read_id, sequence, quality scores per nt, simplex/duplex state and run_id
@@ -134,9 +145,13 @@ fn duplex_processor(config: Config) -> Result<(), Error> {
         let run_id = raw_run_id.split("_").next().unwrap_or("NA");
         let poly_a_estimate = get_optional_int_bam_tag(&this_record, b"pt").unwrap_or(-1);
         let channel = get_optional_int_bam_tag(&this_record, b"ch").unwrap_or(-1);
-
+        let mut mean_error_prob = 1.0;
+        let mut read_length = 0;
         //(re-)calculate per read mean accuracy (to be seen whether we want to re-evaluate it after trimming?
-        let (mean_error_prob, read_length) = calc_mean_median_error(&qualities);
+        if skip_first < qualities.len() {
+            (mean_error_prob, read_length) = calc_mean_median_error(&qualities[skip_first..]);
+        }
+
         let mean_quality = error_prob_to_phred(mean_error_prob);
 
         let filtering_passed: bool =
@@ -169,9 +184,13 @@ fn duplex_processor(config: Config) -> Result<(), Error> {
                     sequence,
                     phred_to_utf8(qualities)
                 )?;
-                for c in qualities.iter() {
+                for (i, c) in qualities.iter().enumerate() {
                     if c <= &(MAX_QSCORE as u8) {
-                        duplex_p_qscore_hist[*c as usize] += 1
+                        if i <= skip_first {
+                            duplex_s_qscore_hist[*c as usize] += 1
+                        } else {
+                            duplex_p_qscore_hist[*c as usize] += 1
+                        }
                     } else {
                         panic!("QScore outside of expected range!")
                     }
@@ -188,9 +207,13 @@ fn duplex_processor(config: Config) -> Result<(), Error> {
                     sequence,
                     phred_to_utf8(qualities)
                 )?;
-                for c in qualities.iter() {
+                for (i, c) in qualities.iter().enumerate() {
                     if c <= &(MAX_QSCORE as u8) {
-                        simplex_p_qscore_hist[*c as usize] += 1
+                        if i <= skip_first {
+                            simplex_s_qscore_hist[*c as usize] += 1
+                        } else {
+                            simplex_p_qscore_hist[*c as usize] += 1
+                        }
                     } else {
                         panic!("QScore outside of expected range!")
                     }
@@ -198,17 +221,25 @@ fn duplex_processor(config: Config) -> Result<(), Error> {
             }
         } else {
             if duplex_state == 1 {
-                for c in qualities.iter() {
+                for (i, c) in qualities.iter().enumerate() {
                     if c <= &(MAX_QSCORE as u8) {
-                        duplex_f_qscore_hist[*c as usize] += 1
+                        if i <= skip_first {
+                            duplex_s_qscore_hist[*c as usize] += 1
+                        } else {
+                            duplex_f_qscore_hist[*c as usize] += 1
+                        }
                     } else {
                         panic!("QScore outside of expected range!")
                     }
                 }
             } else {
-                for c in qualities.iter() {
+                for (i, c) in qualities.iter().enumerate() {
                     if c <= &(MAX_QSCORE as u8) {
-                        simplex_f_qscore_hist[*c as usize] += 1
+                        if i <= skip_first {
+                            simplex_s_qscore_hist[*c as usize] += 1
+                        } else {
+                            simplex_f_qscore_hist[*c as usize] += 1
+                        }
                     } else {
                         panic!("QScore outside of expected range!")
                     }
@@ -221,18 +252,20 @@ fn duplex_processor(config: Config) -> Result<(), Error> {
     let mut writer = BufWriter::new(hist_output_file);
     writeln!(
         &mut writer,
-        "phred_score,simplex_pass_count,duplex_pass_count,simplex_fail_count,duplex_fail_count"
+        "phred_score,simplex_pass_count,duplex_pass_count,simplex_fail_count,duplex_fail_count,simplex_skip_count,duplex_skip_count"
     )?;
 
     for qscore in 0..MAX_QSCORE {
         writeln!(
             &mut writer,
-            "{},{},{},{},{}",
+            "{},{},{},{},{},{},{}",
             qscore,
             simplex_p_qscore_hist[qscore],
             duplex_p_qscore_hist[qscore],
             simplex_f_qscore_hist[qscore],
-            duplex_f_qscore_hist[qscore]
+            duplex_f_qscore_hist[qscore],
+            simplex_s_qscore_hist[qscore],
+            duplex_s_qscore_hist[qscore]
         )?;
     }
     Ok(())
@@ -246,6 +279,7 @@ fn simplex_processor(config: Config) -> Result<(), Error> {
 
     let min_read_length: usize = config.min_read_length;
     let min_mean_qscore: f64 = config.min_mean_qscore;
+    let skip_first: usize = config.skip_first;
 
     //create output files
     let per_read_statsfile = File::create(per_read_filename)?;
@@ -265,6 +299,7 @@ fn simplex_processor(config: Config) -> Result<(), Error> {
     //create array to count phred qscores
     let mut simplex_p_qscore_hist: [u64; MAX_QSCORE] = [0; MAX_QSCORE];
     let mut simplex_f_qscore_hist: [u64; MAX_QSCORE] = [0; MAX_QSCORE];
+    let mut simplex_s_qscore_hist: [u64; MAX_QSCORE] = [0; MAX_QSCORE];
 
     for record in bam_reader {
         //extract read_id, sequence, quality scores per nt, simplex/duplex state and run_id
@@ -280,8 +315,13 @@ fn simplex_processor(config: Config) -> Result<(), Error> {
         let poly_a_estimate = get_optional_int_bam_tag(&this_record, b"pt").unwrap_or(-1);
         let channel = get_optional_int_bam_tag(&this_record, b"ch").unwrap_or(-1);
 
+        let mut mean_error_prob = 1.0;
+        let mut read_length = 0;
         //(re-)calculate per read mean accuracy (to be seen whether we want to re-evaluate it after trimming?
-        let (mean_error_prob, read_length) = calc_mean_median_error(&qualities);
+        if skip_first < qualities.len() {
+            (mean_error_prob, read_length) = calc_mean_median_error(&qualities[skip_first..]);
+        }
+
         let mean_quality = error_prob_to_phred(mean_error_prob);
 
         let filtering_passed: bool =
@@ -311,17 +351,25 @@ fn simplex_processor(config: Config) -> Result<(), Error> {
                 sequence,
                 phred_to_utf8(qualities)
             )?;
-            for c in qualities.iter() {
+            for (i, c) in qualities.iter().enumerate() {
                 if c <= &(MAX_QSCORE as u8) {
-                    simplex_p_qscore_hist[*c as usize] += 1
+                    if i <= skip_first {
+                        simplex_s_qscore_hist[*c as usize] += 1
+                    } else {
+                        simplex_p_qscore_hist[*c as usize] += 1
+                    }
                 } else {
                     panic!("QScore outside of expected range!")
                 }
             }
         } else {
-            for c in qualities.iter() {
+            for (i, c) in qualities.iter().enumerate() {
                 if c <= &(MAX_QSCORE as u8) {
-                    simplex_f_qscore_hist[*c as usize] += 1
+                    if i <= skip_first {
+                        simplex_s_qscore_hist[*c as usize] += 1
+                    } else {
+                        simplex_f_qscore_hist[*c as usize] += 1
+                    }
                 } else {
                     panic!("QScore outside of expected range!")
                 }
@@ -336,8 +384,11 @@ fn simplex_processor(config: Config) -> Result<(), Error> {
     for qscore in 0..MAX_QSCORE {
         writeln!(
             &mut writer,
-            "{},{},{}",
-            qscore, simplex_p_qscore_hist[qscore], simplex_f_qscore_hist[qscore]
+            "{},{},{},{}",
+            qscore,
+            simplex_p_qscore_hist[qscore],
+            simplex_f_qscore_hist[qscore],
+            simplex_s_qscore_hist[qscore]
         )?;
     }
     Ok(())
