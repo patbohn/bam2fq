@@ -1,4 +1,4 @@
 /target
 !/target/release/bam2fq
-/test
+/test_out
 .ipynb_checkpoints
