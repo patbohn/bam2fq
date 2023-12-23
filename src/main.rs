@@ -149,7 +149,8 @@ fn duplex_processor(config: Config) -> Result<(), Error> {
         let mut read_length = 0;
         //(re-)calculate per read mean accuracy (to be seen whether we want to re-evaluate it after trimming?
         if skip_first < qualities.len() {
-            (mean_error_prob, read_length) = calc_mean_median_error(&qualities[skip_first..]);
+            (mean_error_prob, read_length) =
+                calc_mean_median_error(&qualities[..qualities.len() - skip_first]);
         }
 
         let mean_quality = error_prob_to_phred(mean_error_prob);
@@ -319,7 +320,8 @@ fn simplex_processor(config: Config) -> Result<(), Error> {
         let mut read_length = 0;
         //(re-)calculate per read mean accuracy (to be seen whether we want to re-evaluate it after trimming?
         if skip_first < qualities.len() {
-            (mean_error_prob, read_length) = calc_mean_median_error(&qualities[skip_first..]);
+            (mean_error_prob, read_length) =
+                calc_mean_median_error(&qualities[..qualities.len() - skip_first]);
         }
 
         let mean_quality = error_prob_to_phred(mean_error_prob);
