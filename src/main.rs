@@ -36,6 +36,12 @@ struct Config {
     #[structopt(short="q", long, help = "[Optional] minimal mean qscore to output filtered reads", default_value ="0")]
     min_mean_qscore: f64,
 
+    #[structopt(short="r", long, help = "Set tag if extracting from RNA (disables duplex, enables poly A")]
+    rna: bool,
+
+    #[structopt(short="d", long, help = "Set tag if extracting duplex-called reads")]
+    duplex: bool,
+
 }
 
 const MAX_QSCORE: usize = 94;
@@ -45,6 +51,30 @@ fn main() -> std::io::Result<()> {
     
     let config = Config::from_args();
     
+    let result = match (config.rna, config.duplex) {
+        (true, false) => rna_processor(&config),
+        (false, false) => dna_processor(&config),
+        (false, true) => dna_duplex_processor(&config),
+        (true, true) => Err("RNA sequencing does not have duplex mode!".to_string())
+    }
+
+
+    
+    }
+    
+    //write phred qscore histogram
+    let hist_output_file = File::create(hist_filename)?;
+    let mut writer = BufWriter::new(hist_output_file);
+    writeln!(&mut writer, "phred_score,simplex_pass_count,duplex_pass_count,simplex_fail_count,duplex_fail_count")?;
+
+    for qscore in 0..MAX_QSCORE {
+        writeln!(&mut writer, "{},{},{},{},{}", qscore,simplex_p_qscore_hist[qscore],duplex_p_qscore_hist[qscore],simplex_f_qscore_hist[qscore],duplex_f_qscore_hist[qscore])?;
+        }
+    Ok(())
+}
+
+
+fn dna_processor(config) {
     //define output paths
     let per_read_filename = format!("{}_read_stats.csv.gz", config.output_stats_prefix);
     let hist_filename = format!("{}_all_phred_hist.csv", config.output_stats_prefix);
@@ -54,14 +84,15 @@ fn main() -> std::io::Result<()> {
     let min_read_length: usize = config.min_read_length;
     let min_mean_qscore: f64 = config.min_mean_qscore;
     
+
     //create output files
     let per_read_statsfile = File::create(per_read_filename)?;
     let mut stats_writer = GzEncoder::new(per_read_statsfile, Compression::fast());
     writeln!(&mut stats_writer, "read_id,read_length,mean_phred,mean_error_rate,poly_a_estimate,duplex_state,filtering_passed")?;
-    
+
     let fq_simplex_file = File::create(fq_simplex_filename)?;
     let mut simplex_writer = GzEncoder::new(fq_simplex_file, Compression::fast());
-    
+
 
     let fq_duplex_filename = format!("{}_duplex.fastq.gz", config.output_prefix);
     let fq_duplex_file = File::create(fq_duplex_filename)?;
@@ -71,14 +102,14 @@ fn main() -> std::io::Result<()> {
     //read in bam file
     let bam_reader = BamReader::from_path(config.input_file, THREADS).unwrap();
     //read bam let reader = BufReader::new(MultiGzDecoder::new(input_file));
-    
+
     //create array to count phred qscores
     let mut simplex_p_qscore_hist: [u64; MAX_QSCORE] = [0;MAX_QSCORE];
     let mut simplex_f_qscore_hist: [u64; MAX_QSCORE] = [0;MAX_QSCORE];
 
     let mut duplex_p_qscore_hist: [u64; MAX_QSCORE] = [0;MAX_QSCORE];
     let mut duplex_f_qscore_hist: [u64; MAX_QSCORE] = [0;MAX_QSCORE];
-    
+
     for record in bam_reader {
         //extract read_id, sequence, quality scores per nt, simplex/duplex state and run_id
         let this_record = record.unwrap();
@@ -89,8 +120,9 @@ fn main() -> std::io::Result<()> {
         let qualities = this_record.qualities().raw();
         let duplex_state = get_duplex_tag(&this_record);
         let raw_run_id = get_optional_string_BAM_tag(&this_record, b"RG", "NA".to_owned());
-        let run_id = raw_run_id.split("_").next().unwrap_or("");
+        let run_id = raw_run_id.split("_").next().unwrap_or("NA");
         let poly_a_estimate = get_optional_int_BAM_tag(&this_record, b"pt", -1);
+        let channel = get_optional_int_BAM_tag(&this_record, b"ch", -1);
         
         //(re-)calculate per read mean accuracy (to be seen whether we want to re-evaluate it after trimming?
         let (mean_error_prob, read_length) = calc_mean_median_error(&qualities);
@@ -103,7 +135,7 @@ fn main() -> std::io::Result<()> {
         //write read to simplex or duplex file depending on duplex state
         if filtering_passed {
             if duplex_state == 1 {
-                writeln!(&mut duplex_writer, "@{} run_id={} duplex={} poly_A_length={}\n{}\n+\n{}", id, run_id, duplex_state, poly_a_estimate, sequence, phred_to_utf8(qualities))?;
+                writeln!(&mut duplex_writer, "@{} channel={} pA_length={} run_id={} duplex={} \n{}\n+\n{}", id, channel, poly_a_estimate, run_id, duplex_state, sequence, phred_to_utf8(qualities))?;
                 for c in qualities.iter() {
                     if c <= &(MAX_QSCORE as u8) {
                         duplex_p_qscore_hist[*c as usize] += 1
@@ -113,7 +145,7 @@ fn main() -> std::io::Result<()> {
                 }
                 
             } else {
-                writeln!(&mut simplex_writer, "@{} run_id={} duplex={} poly_A_length={}\n{}\n+\n{}", id, run_id, duplex_state, poly_a_estimate, sequence, phred_to_utf8(qualities))?;
+                writeln!(&mut simplex_writer, "@{} channel={} pA_length={} run_id={} duplex={} \n{}\n+\n{}", id, run_id, duplex_state, poly_a_estimate, sequence, phred_to_utf8(qualities))?;
                 for c in qualities.iter() {
                     if c <= &(MAX_QSCORE as u8) {
                         simplex_p_qscore_hist[*c as usize] += 1
@@ -144,17 +176,12 @@ fn main() -> std::io::Result<()> {
             
         }
     }
-    
-    //write phred qscore histogram
-    let hist_output_file = File::create(hist_filename)?;
-    let mut writer = BufWriter::new(hist_output_file);
-    writeln!(&mut writer, "phred_score,simplex_pass_count,duplex_pass_count,simplex_fail_count,duplex_fail_count")?;
-
-    for qscore in 0..MAX_QSCORE {
-        writeln!(&mut writer, "{},{},{},{},{}", qscore,simplex_p_qscore_hist[qscore],duplex_p_qscore_hist[qscore],simplex_f_qscore_hist[qscore],duplex_f_qscore_hist[qscore])?;
-        }
-    Ok(())
 }
+
+fn rna_processor() {
+
+}
+
 
 fn get_duplex_tag(record : &Record) -> i8 {
     if let Some(tag_value) = record.tags().get(b"dx") {
