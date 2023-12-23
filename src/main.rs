@@ -79,8 +79,10 @@ fn main() -> std::io::Result<()> {
     let config = Config::from_args();
 
     let result = if config.duplex {
+        println!("Duplex enabled");
         duplex_processor(config)
     } else {
+        println!("Duplex not enabled");
         simplex_processor(config)
     };
     result
