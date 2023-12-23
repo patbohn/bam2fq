@@ -187,7 +187,7 @@ fn duplex_processor(config: Config) -> Result<(), Error> {
                 )?;
                 for (i, c) in qualities.iter().enumerate() {
                     if c <= &(MAX_QSCORE as u8) {
-                        if i <= skip_first {
+                        if qualities.len() - i <= skip_first {
                             duplex_s_qscore_hist[*c as usize] += 1
                         } else {
                             duplex_p_qscore_hist[*c as usize] += 1
@@ -210,7 +210,7 @@ fn duplex_processor(config: Config) -> Result<(), Error> {
                 )?;
                 for (i, c) in qualities.iter().enumerate() {
                     if c <= &(MAX_QSCORE as u8) {
-                        if i <= skip_first {
+                        if qualities.len() - i <= skip_first {
                             simplex_s_qscore_hist[*c as usize] += 1
                         } else {
                             simplex_p_qscore_hist[*c as usize] += 1
@@ -224,7 +224,7 @@ fn duplex_processor(config: Config) -> Result<(), Error> {
             if duplex_state == 1 {
                 for (i, c) in qualities.iter().enumerate() {
                     if c <= &(MAX_QSCORE as u8) {
-                        if i <= skip_first {
+                        if qualities.len() - i <= skip_first {
                             duplex_s_qscore_hist[*c as usize] += 1
                         } else {
                             duplex_f_qscore_hist[*c as usize] += 1
@@ -236,7 +236,7 @@ fn duplex_processor(config: Config) -> Result<(), Error> {
             } else {
                 for (i, c) in qualities.iter().enumerate() {
                     if c <= &(MAX_QSCORE as u8) {
-                        if i <= skip_first {
+                        if qualities.len() - i <= skip_first {
                             simplex_s_qscore_hist[*c as usize] += 1
                         } else {
                             simplex_f_qscore_hist[*c as usize] += 1
@@ -355,7 +355,7 @@ fn simplex_processor(config: Config) -> Result<(), Error> {
             )?;
             for (i, c) in qualities.iter().enumerate() {
                 if c <= &(MAX_QSCORE as u8) {
-                    if i <= skip_first {
+                    if qualities.len() - i <= skip_first {
                         simplex_s_qscore_hist[*c as usize] += 1
                     } else {
                         simplex_p_qscore_hist[*c as usize] += 1
@@ -367,7 +367,7 @@ fn simplex_processor(config: Config) -> Result<(), Error> {
         } else {
             for (i, c) in qualities.iter().enumerate() {
                 if c <= &(MAX_QSCORE as u8) {
-                    if i <= skip_first {
+                    if qualities.len() - i <= skip_first {
                         simplex_s_qscore_hist[*c as usize] += 1
                     } else {
                         simplex_f_qscore_hist[*c as usize] += 1
