@@ -24,7 +24,7 @@ use phred_int_to_prob::PHRED_TO_ERROR_PROB;
     about = "Converts unmapped bam output of the dorado basecaller 
     into fastq.gz files (split by simplex/duplex when supplying -d) 
     and calculates QC metrics in parallel. 
-    Also outputs poly A tail estimate located in pt tag and channel."
+    Also outputs poly A tail estimate located in pt tag and channel and parsed move table."
 )]
 struct Config {
     #[structopt(parse(from_os_str), help = "Input fastq file")]
@@ -47,7 +47,7 @@ struct Config {
     output_stats_prefix: String,
 
     #[structopt(
-        short = "m",
+        short = "minl",
         long,
         help = "[Optional] minimal read length filter to output reads",
         default_value = "0"
@@ -78,6 +78,13 @@ struct Config {
         default_value = "0"
     )]
     skip_first: usize,
+
+    #[structopt(
+        short = "m",
+        long,
+        help = "replace Phred quality scores with move duration"
+    )]
+    move_duration_as_qual: bool,
 }
 
 const MAX_QSCORE: usize = 94;
@@ -185,6 +192,7 @@ fn duplex_processor(config: Config) -> Result<(), Error> {
                     sequence,
                     phred_to_utf8(qualities)
                 )?;
+
                 for (i, c) in qualities.iter().enumerate() {
                     if c <= &(MAX_QSCORE as u8) {
                         if qualities.len() - i <= skip_first {
@@ -281,13 +289,14 @@ fn simplex_processor(config: Config) -> Result<(), Error> {
     let min_read_length: usize = config.min_read_length;
     let min_mean_qscore: f64 = config.min_mean_qscore;
     let skip_first: usize = config.skip_first;
+    let move_duration_as_qual = config.move_duration_as_qual;
 
     //create output files
     let per_read_statsfile = File::create(per_read_filename)?;
     let mut stats_writer = GzEncoder::new(per_read_statsfile, Compression::fast());
     writeln!(
         &mut stats_writer,
-        "read_id,read_length,mean_phred,mean_error_rate,poly_a_estimate,filtering_passed,channel"
+        "read_id,read_length,mean_phred,mean_error_rate,poly_a_estimate,filtering_passed,channel,sum_moves"
     )?;
 
     let fq_simplex_file = File::create(fq_simplex_filename)?;
@@ -316,6 +325,23 @@ fn simplex_processor(config: Config) -> Result<(), Error> {
         let poly_a_estimate = get_optional_int_bam_tag(&this_record, b"pt").unwrap_or(-1);
         let channel = get_optional_int_bam_tag(&this_record, b"ch").unwrap_or(-1);
 
+        let stride;
+        let moves;
+        let sum_moves;
+        let move_string;
+        let move_overflows;
+
+        if move_duration_as_qual {
+            (stride, moves) = get_nt_durations(&this_record).unwrap();
+            sum_moves = moves.iter().sum::<usize>();
+            (move_string, move_overflows) = moves_to_utf8(&moves);
+        } else {
+            sum_moves = 0;
+            stride = 0;
+            move_overflows = vec![];
+            move_string = "".to_owned();
+        }
+
         let mut mean_error_prob = 1.0;
         let mut read_length = 0;
         //(re-)calculate per read mean accuracy (to be seen whether we want to re-evaluate it after trimming?
@@ -331,28 +357,53 @@ fn simplex_processor(config: Config) -> Result<(), Error> {
         //write per read stats to file
         writeln!(
             &mut stats_writer,
-            "{},{},{:.1},{:1.2e},{},{},{}",
+            "{},{},{:.1},{:1.2e},{},{},{},{}",
             id,
             read_length,
             mean_quality,
             mean_error_prob,
             poly_a_estimate,
             filtering_passed,
-            channel
+            channel,
+            sum_moves
         )?;
 
-        //write read to simplex or duplex file depending on duplex state
+        //write read out into fastq
         if filtering_passed {
-            writeln!(
-                &mut simplex_writer,
-                "@{} channel={} polya={} run_id={} \n{}\n+\n{}",
-                id,
-                channel,
-                poly_a_estimate,
-                run_id,
-                sequence,
-                phred_to_utf8(qualities)
-            )?;
+            if move_duration_as_qual {
+                writeln!(
+                    &mut simplex_writer,
+                    "@{} channel={} polya={} run_id={} stride={} move_overflows=[{}] \n{}\n+\n{}",
+                    id,
+                    channel,
+                    poly_a_estimate,
+                    run_id,
+                    stride,
+                    move_overflows
+                        .iter()
+                        .map(|num| num.to_string())
+                        .collect::<Vec<String>>()
+                        .join(","),
+                    sequence,
+                    if move_duration_as_qual {
+                        move_string
+                    } else {
+                        phred_to_utf8(qualities)
+                    }
+                )?;
+            } else {
+                writeln!(
+                    &mut simplex_writer,
+                    "@{} channel={} polya={} run_id={} \n{}\n+\n{}",
+                    id,
+                    channel,
+                    poly_a_estimate,
+                    run_id,
+                    sequence,
+                    phred_to_utf8(qualities)
+                )?;
+            }
+
             for (i, c) in qualities.iter().enumerate() {
                 if c <= &(MAX_QSCORE as u8) {
                     if qualities.len() - i <= skip_first {
@@ -450,7 +501,7 @@ fn error_prob_to_phred(prob: f64) -> f64 {
     return -10.0_f64 * prob.log10();
 }
 
-fn phred_to_utf8(quality_array: &[u8]) -> std::string::String {
+fn phred_to_utf8(quality_array: &[u8]) -> String {
     let mut offset_array: Vec<u8> = Vec::with_capacity(quality_array.len());
 
     for &byte in quality_array {
@@ -464,4 +515,72 @@ fn phred_to_utf8(quality_array: &[u8]) -> std::string::String {
         }
     };
     return quality_string;
+}
+
+fn moves_to_utf8(moves: &[usize]) -> (String, Vec<usize>) {
+    let mut offset_array: Vec<u8> = Vec::with_capacity(moves.len());
+    let mut overflows: Vec<usize> = vec![];
+
+    for &byte in moves {
+        if byte < 92 {
+            offset_array.push(byte as u8 + 33);
+        } else {
+            offset_array.push(92 + 33);
+            overflows.push(byte);
+        }
+    }
+
+    let move_string: String = match String::from_utf8(offset_array) {
+        Ok(s) => s,
+        Err(_e) => {
+            panic!("Error converting move durations to String")
+        }
+    };
+
+    return (move_string, overflows);
+}
+
+fn get_nt_durations(record: &Record) -> Option<(usize, Vec<usize>)> {
+    if let Some(tag_value) = record.tags().get(b"mv") {
+        match tag_value {
+            TagValue::IntArray(tag_array) => {
+                //println!("Detected mv table");
+                Some(calc_moves_per_nt(tag_array.raw()))
+            }
+            _ => {
+                panic!("Unexpected tag type at mv");
+            }
+        }
+    } else {
+        None
+    }
+}
+
+fn calc_moves_per_nt(moves_table: &[u8]) -> (usize, Vec<usize>) {
+    //println!("calculating moves per nt");
+    let stride: usize = moves_table[0] as usize;
+
+    let mut total_num_moves: usize = 0;
+    for mv in &moves_table[1..] {
+        total_num_moves += *mv as usize;
+    }
+    let mut stay_vector: Vec<usize> = Vec::new();
+    let mut count: usize = 1;
+
+    for mv in &moves_table[1..] {
+        match mv {
+            0 => {
+                count += 1;
+            }
+            1 => {
+                stay_vector.push(count);
+                count = 1;
+            }
+            _ => {
+                panic!("Unexpected value in move table! Expected only values of <0,1>")
+            }
+        }
+    }
+    //println!("Found {} moves", stay_vector.len());
+    (stride, stay_vector)
 }
