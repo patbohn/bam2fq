@@ -296,7 +296,7 @@ fn simplex_processor(config: Config) -> Result<(), Error> {
     let mut stats_writer = GzEncoder::new(per_read_statsfile, Compression::fast());
     writeln!(
         &mut stats_writer,
-        "read_id,read_length,mean_phred,mean_error_rate,poly_a_estimate,filtering_passed,channel,sum_moves"
+        "read_id,read_length,mean_phred,mean_error_rate,poly_a_estimate,filtering_passed,mux,channel,read_number,scaling_version,scaling_midpoint,scaling_dispersion,sum_moves"
     )?;
 
     let fq_simplex_file = File::create(fq_simplex_filename)?;
@@ -323,7 +323,12 @@ fn simplex_processor(config: Config) -> Result<(), Error> {
             get_optional_string_bam_tag(&this_record, b"RG").unwrap_or("NA".to_owned());
         let run_id = raw_run_id.split("_").next().unwrap_or("NA");
         let poly_a_estimate = get_optional_int_bam_tag(&this_record, b"pt").unwrap_or(-1);
+        let mux = get_optional_int_bam_tag(&this_record, b"mx").unwrap_or(-1);
         let channel = get_optional_int_bam_tag(&this_record, b"ch").unwrap_or(-1);
+        let read_number = get_optional_int_bam_tag(&this_record, b"rn").unwrap_or(-1);
+        let scaling_version = get_optional_string_bam_tag(&this_record, b"sv").unwrap_or("NA".to_owned());
+        let scaling_midpoint = get_optional_float_bam_tag(&this_record, b"sm").unwrap_or(-1.0);
+        let scaling_deviation = get_optional_float_bam_tag(&this_record, b"sd").unwrap_or(-1.0);
 
         let stride;
         let moves;
@@ -357,15 +362,20 @@ fn simplex_processor(config: Config) -> Result<(), Error> {
         //write per read stats to file
         writeln!(
             &mut stats_writer,
-            "{},{},{:.1},{:1.2e},{},{},{},{}",
+            "{},{},{:.1},{:1.2e},{},{},{},{},{},{},{},{},{}",
             id,
             read_length,
             mean_quality,
             mean_error_prob,
             poly_a_estimate,
             filtering_passed,
+            mux,
             channel,
-            sum_moves
+            read_number,
+            scaling_version,
+            scaling_midpoint,
+            scaling_deviation,
+            sum_moves,
         )?;
 
         //write read out into fastq
@@ -477,6 +487,17 @@ fn get_optional_int_bam_tag(record: &Record, tag: &[u8; 2]) -> Option<i32> {
     if let Some(tag_value) = record.tags().get(tag) {
         match tag_value {
             TagValue::Int(tag_int, _) => Some(tag_int as i32),
+            _ => panic!("Unexpected tag type"),
+        }
+    } else {
+        None
+    }
+}
+
+fn get_optional_float_bam_tag(record: &Record, tag: &[u8; 2]) -> Option<f32> {
+    if let Some(tag_value) = record.tags().get(tag) {
+        match tag_value {
+            TagValue::Float(tag_float) => Some(tag_float as f32),
             _ => panic!("Unexpected tag type"),
         }
     } else {
